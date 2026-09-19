@@ -3,11 +3,14 @@
 
 import argparse
 import json
+import os
 import sys
 from typing import Dict, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
+
+import anthropic
 
 
 API_URL = "https://mygene.info/v3/query"
@@ -37,6 +40,49 @@ def fetch_gene(symbol: str) -> Optional[Dict]:
 
     hits = payload.get("hits", [])
     return hits[0] if hits else None
+
+
+def summarize_with_claude(gene: Dict) -> str:
+    """Ask Claude to turn the retrieved gene record into plain English."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set.")
+
+    gene_details = {
+        "symbol": gene.get("symbol"),
+        "name": gene.get("name"),
+        "type_of_gene": gene.get("type_of_gene"),
+        "summary": gene.get("summary"),
+    }
+    client = anthropic.Anthropic(api_key=api_key)
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=250,
+            system=(
+                "You explain biological information accurately for a general audience. "
+                "Do not provide medical advice."
+            ),
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "Using only the following gene record, write one concise, "
+                        "plain-English paragraph describing the gene's function. "
+                        "Do not use headings or bullet points.\n\n"
+                        + json.dumps(gene_details)
+                    ),
+                }
+            ],
+        )
+    except anthropic.APIError as error:
+        raise RuntimeError(f"Claude API request failed: {error}") from error
+
+    text_parts = [block.text for block in response.content if block.type == "text"]
+    if not text_parts:
+        raise RuntimeError("Claude returned no text summary.")
+    return " ".join(text_parts).strip()
 
 
 def main() -> int:
@@ -73,6 +119,14 @@ def main() -> int:
         aliases = [aliases]
     print(f"Aliases: {', '.join(aliases) if aliases else 'None'}")
     print(f"\nSummary:\n{gene.get('summary', 'No summary available.')}")
+
+    try:
+        plain_english_summary = summarize_with_claude(gene)
+    except RuntimeError as error:
+        print(f"\nClaude summary unavailable: {error}", file=sys.stderr)
+        return 1
+
+    print(f"\nPlain-English summary:\n{plain_english_summary}")
     return 0
 
 
